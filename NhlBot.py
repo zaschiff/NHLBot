@@ -1,7 +1,8 @@
 import requests
-import json
-from datetime import datetime, timedelta
 import discord
+
+from bs4 import BeautifulSoup
+from datetime import date, datetime, timedelta
 from discord.ext import commands, tasks
 
 teams = {
@@ -38,22 +39,7 @@ teams = {
     "VEG": "Vegas Golden Knights",
     "SEA": "Seattle Kraken"
     }
-# date format
-# 
-
-
-# API URLS***********************************************************
-# injured_player_url = "https://api.sportsdata.io/v3/nhl/projections/json/InjuredPlayers?key=24e501c1395c4852b2d5c414d567a329"
-# news_feed = f"https://api.sportsdata.io/v3/nhl/scores/json/NewsByDate/{today_str}?key=24e501c1395c4852b2d5c414d567a329"
-# team_feed = "https://api.sportsdata.io/v3/nhl/scores/json/AllTeams?key=24e501c1395c4852b2d5c414d567a329"
-#********************************************************************
-
-# TESTING DATA PULLS and INFORMATION GATHERING***********************
-# req = requests.get(news_feed)
-# with open("news_info.json", 'w') as f:
-#     json.dump(req.json(), f)
-#********************************************************************
-
+old_news = {}
 intents = discord.Intents.all()
 dbNewsBot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -63,12 +49,9 @@ async def on_ready():
     sendInjuryInfo.start()
     sendNewsInfo.start()
 
-# change this to 2 hours when implementing the API Call
-@tasks.loop(hours=2)
+
+@tasks.loop(hours=1)
 async def sendInjuryInfo():
-    # replace this with API Call
-    # with open("injured_test.json", 'r')  as i:
-    #     players_info = json.load(i)
     injury_feed = "https://api.sportsdata.io/v3/nhl/projections/json/InjuredPlayers?key=24e501c1395c4852b2d5c414d567a329"
     req = requests.get(injury_feed)
     injury_result= req.json()
@@ -84,44 +67,50 @@ async def sendInjuryInfo():
             name, info = injured_player_format(player)
             injury_list.add_field(name=name, value=info, inline=False)
     else:
-        injury_list.add_field(name="Nothing New", value="", inline=False)
+        injury_list.add_field(name="Nothing new...", value="", inline=False)
 
     await sendEmmbed("injury-list", injury_list)
 
-# change this to 2 hours when implementing api
-@tasks.loop(hours=2)
+@tasks.loop(hours=1)
 async def sendNewsInfo():
-    # replace with api call
-    # with open("news_info.json", 'r') as n:
-    #     news_list = json.load(n)
-    today_str = datetime.strftime(datetime.today(), "%Y-%b-%d").upper()
-    news_feed = f"https://api.sportsdata.io/v3/nhl/scores/json/NewsByDate/{today_str}?key=24e501c1395c4852b2d5c414d567a329"
-    req = requests.get(news_feed)
-    news_results = req.json()
-        
-    news_articles = discord.Embed(
-        title="Recent News",
-        description="Current League updates",
-        color=discord.Color.yellow()
+    global old_news
+    news_embed = discord.Embed(
+        title="Current News",
+        description="Current NHL News Articles",
+        color = discord.Color.green()
     )
 
-    if not news_results == []:
-        for article in news_results:
-            title, content, url, date_written = news_article_format(article)
-            news_articles.add_field(name=title, value="\n"+date_written+"\n"+content+"\n\n" + url, inline=False)
-    else:
-        news_articles.add_field(name=f"No New Hockey News for Today ({today_str}).", value="", inline=False)
+    stop_day = date.today() - timedelta(days=3)
 
-    await sendEmmbed("hockey-news", news_articles)
+    current_news_articles = getNews()
+
+    article_count = 0
+
+    for key_o in old_news.keys():
+        for key_n in current_news_articles.keys():
+            if key_o == key_n:
+                article_count += 1
+
+    if article_count >= len(current_news_articles):
+        news_embed.add_field(name="Nothing new...", value="", inline=False)
+        await sendEmmbed('hockey-news', news_embed)
+    else:
+        for title, info in current_news_articles.items():
+            if info['date'] > stop_day:
+                news_embed.add_field(name=title, value=info['url'], inline=False)
+        await sendEmmbed('hockey-news', news_embed)
+    
+    old_news =  current_news_articles
 
 
     
 async def sendEmmbed(channel_name: str, card: discord.Embed):
-    channels = dbNewsBot.guilds[0].channels
+    # channels = dbNewsBot.guilds[0].channels
 
-    for channel in channels:
-        if channel.name == channel_name:
-                await channel.send(embed=card)
+    for guild in dbNewsBot.guilds:
+        for channel in guild.channels:
+            if channel.name == channel_name:
+                    await channel.send(embed=card)
      
 
 def injured_player_format(player):
@@ -135,14 +124,35 @@ def injured_player_format(player):
     '''
     return name, info
 
-def news_article_format(article):
-    title = article['Title']
-    content = article['Content'][0:50]+"..."
-    url=article['Url']
+def getNews():
+    primary_url = 'https://www.thescore.com/nhl/news'
+    news_article = {}
 
-    unformatted_date = article['Updated'][:10].split("-")
-    date_updated = "-".join([unformatted_date[1], unformatted_date[2], unformatted_date[0]])
+    res = requests.get(primary_url)
+    scoreSoup = BeautifulSoup(res.text, 'html.parser')
 
-    return title, content, url, date_updated
+    for div in scoreSoup.find_all('div', class_='jsx-1435942676'):
+        for a in div.find_all('a', href=True):
+            title = div.find(class_='jsx-403783000 title')
+            
+            linkSplit = a['href'].split('/')
+            for i in range(len(linkSplit)-1):
+                if linkSplit[i] == '':
+                    linkSplit.pop(i)
+            
+            if len(linkSplit) > 2 and linkSplit[1] == 'news':
+                time_info = div.find_all('div', class_='info')[0].find_all('time')
+            
+            if len(linkSplit) > 2 and linkSplit[1] == 'news':
+                news_article[title.text] = {'url': primary_url + a['href'], 'date': datetime.fromisoformat(time_info[0]['datetime']).date()}
     
-dbNewsBot.run('')    
+    return news_article
+    
+dbNewsBot.run('')
+
+
+# API URLS***********************************************************
+# injured_player_url = "https://api.sportsdata.io/v3/nhl/projections/json/InjuredPlayers?key=24e501c1395c4852b2d5c414d567a329"
+# news_feed = f"https://api.sportsdata.io/v3/nhl/scores/json/NewsByDate/{today_str}?key=24e501c1395c4852b2d5c414d567a329"
+# team_feed = "https://api.sportsdata.io/v3/nhl/scores/json/AllTeams?key=24e501c1395c4852b2d5c414d567a329"
+#********************************************************************
